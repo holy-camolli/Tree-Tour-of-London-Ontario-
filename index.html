@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tree Guide – London, ON (test)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root{--bg:#fff;--fg:#1d2a1f;--muted:#5d6b60;--line:#dfe6e0;--accent:#2f6b3a}
+  @media (prefers-color-scheme:dark){:root{--bg:#141a15;--fg:#e8efe9;--muted:#9bab9f;--line:#2a352c;--accent:#7fc58b}}
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.4 system-ui,sans-serif;background:var(--bg);color:var(--fg);display:flex;flex-direction:column;height:100dvh}
+  header{padding:8px 16px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0;flex:1}
+  button,select{font:inherit;padding:6px 10px;border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:6px}
+  button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+  #map{flex:1;min-height:200px}
+  #list{height:38vh;overflow:auto;border-top:1px solid var(--line)}
+  #status{padding:6px 16px;color:var(--muted);font-size:13px}
+  .t{padding:8px 16px;border-bottom:1px solid var(--line);display:flex;gap:10px;cursor:pointer}
+  .t b{display:block}.t small{color:var(--muted)}
+  .d{margin-left:auto;white-space:nowrap;color:var(--accent);font-weight:600}
+  .dot{width:12px;height:12px;border-radius:50%;margin-top:4px;flex:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>🌳 Trees near you</h1>
+  <button id="follow">Follow my GPS</button>
+  <select id="radius"><option value="50">50 m</option><option value="100" selected>100 m</option><option value="250">250 m</option></select>
+</header>
+<div id="status">Loading trees…</div>
+<div id="map"></div>
+<div id="list"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script>
+const STEP=0.05;                       // must match the tile size used when splitting the data
+const map=L.map('map').setView([43.0096,-81.2737],15);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+const layer=L.layerGroup().addTo(map), canvas=L.canvas();
+const cache={};                        // tile key -> array of trees (or promise while loading)
+let me=null, meMarker=null, ring=null, watchId=null, token=0;
+
+const $=id=>document.getElementById(id);
+const status=t=>$('status').textContent=t;
+
+function dist(a,b,c,d){ // metres, equirectangular - fine for short range
+  const x=(d-b)*Math.PI/180*Math.cos((a+c)/2*Math.PI/180), y=(c-a)*Math.PI/180;
+  return Math.sqrt(x*x+y*y)*6371000;
+}
+
+// Load the data tile(s) that overlap a square around the user (cached after first load)
+function loadTile(a,b){
+  const k=a+'_'+b;
+  if(!cache[k]) cache[k]=new Promise(res=>{
+    Papa.parse('data/london/'+k+'.csv',{download:true,header:true,skipEmptyLines:true,
+      complete:r=>res(r.data.map(x=>({id:x.id,lat:+x.lat,lon:+x.lon}))),
+      error:()=>res([])});             // tile doesn't exist (outside the city) -> no trees
+  });
+  return cache[k];
+}
+function tilesFor(lat,lon,r){
+  const dLat=r/111000, dLon=r/(111000*Math.cos(lat*Math.PI/180));
+  const out=[];
+  for(let a=Math.floor((lat-dLat)/STEP);a<=Math.floor((lat+dLat)/STEP);a++)
+    for(let b=Math.floor((lon-dLon)/STEP);b<=Math.floor((lon+dLon)/STEP);b++) out.push([a,b]);
+  return out;
+}
+
+async function update(){
+  if(!me) return;
+  const my=++token, r=+$('radius').value;
+  status('Loading nearby trees…');
+  const sets=await Promise.all(tilesFor(me[0],me[1],r).map(([a,b])=>loadTile(a,b)));
+  if(my!==token) return;               // a newer position arrived while loading
+  const near=[];
+  for(const set of sets) for(const t of set){
+    if(Math.abs(t.lat-me[0])>r/111000) continue;       // cheap pre-filter
+    const d=dist(me[0],me[1],t.lat,t.lon);
+    if(d<=r) near.push({t,d});
+  }
+  near.sort((a,b)=>a.d-b.d);
+  layer.clearLayers();
+  const list=$('list'); list.innerHTML='';
+  near.slice(0,400).forEach(({t,d},i)=>{
+    L.circleMarker([t.lat,t.lon],{renderer:canvas,radius:6,color:'#fff',weight:1,fillColor:'#2f8f4a',fillOpacity:.95})
+      .bindPopup(`<b>Tree #${t.id}</b><br>${Math.round(d)} m away`).addTo(layer);
+    if(i<50){
+      const el=document.createElement('div'); el.className='t';
+      el.innerHTML=`<span class="dot" style="background:#2f8f4a"></span><div><b>Tree #${t.id}</b><small>${t.lat.toFixed(5)}, ${t.lon.toFixed(5)}</small></div><span class="d">${Math.round(d)} m</span>`;
+      el.onclick=()=>map.setView([t.lat,t.lon],19);
+      list.appendChild(el);
+    }
+  });
+  if(!near.length) list.innerHTML='<div class="t"><div>No trees within this radius.</div></div>';
+  status(`${near.length} tree${near.length===1?'':'s'} within ${r} m`);
+}
+function setMe(lat,lon,pan){
+  me=[lat,lon];
+  if(!meMarker){
+    meMarker=L.circleMarker(me,{radius:9,color:'#fff',weight:3,fillColor:'#1a73e8',fillOpacity:1}).addTo(map);
+    ring=L.circle(me,{radius:+$('radius').value,color:'#1a73e8',weight:1,fillOpacity:.04}).addTo(map);
+  } else { meMarker.setLatLng(me); ring.setLatLng(me); }
+  ring.setRadius(+$('radius').value);
+  if(pan) map.setView(me,Math.max(map.getZoom(),18));
+  update();
+}
+
+$('radius').onchange=()=>{ if(ring) ring.setRadius(+$('radius').value); update(); };
+map.on('click',e=>{ if(watchId===null) setMe(e.latlng.lat,e.latlng.lng,false); });  // tap map to simulate position
+
+$('follow').onclick=()=>{
+  if(watchId!==null){ navigator.geolocation.clearWatch(watchId); watchId=null; $('follow').classList.remove('on'); $('follow').textContent='Follow my GPS'; return; }
+  if(!navigator.geolocation){ status('GPS not supported in this browser.'); return; }
+  let first=true;
+  watchId=navigator.geolocation.watchPosition(
+    p=>{ setMe(p.coords.latitude,p.coords.longitude,first); first=false; },
+    e=>{ status('GPS error: '+e.message+' - you can still tap the map to set a spot.'); },
+    {enableHighAccuracy:true,maximumAge:2000,timeout:20000});
+  $('follow').classList.add('on'); $('follow').textContent='Following... (tap to stop)';
+};
+status('Ready. Tap "Follow my GPS", or tap the map to try a spot.');
+</script>
+</body>
+</html>
