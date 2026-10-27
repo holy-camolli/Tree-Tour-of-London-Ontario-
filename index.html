@@ -20,6 +20,8 @@
   .t{padding:8px 16px;border-bottom:1px solid var(--line);display:flex;gap:10px;cursor:pointer}
   .t b{display:block}.t small{color:var(--muted)}
   .d{margin-left:auto;white-space:nowrap;color:var(--accent);font-weight:600}
+  .w{color:#b26a00;font-size:12px}
+  .fact{font-size:13px;margin-top:4px}
   .dot{width:12px;height:12px;border-radius:50%;margin-top:4px;flex:none}
 </style>
 </head>
@@ -40,23 +42,26 @@ const STEP=0.05;                       // must match the tile size used when spl
 const map=L.map('map').setView([43.0096,-81.2737],15);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
 const layer=L.layerGroup().addTo(map), canvas=L.canvas();
-const cache={};                        // tile key -> array of trees (or promise while loading)
-let me=null, meMarker=null, ring=null, watchId=null, token=0;
+const cache={};                        // tile key -> promise of trees
+let species=[], me=null, meMarker=null, ring=null, watchId=null, token=0;
 
 const $=id=>document.getElementById(id);
 const status=t=>$('status').textContent=t;
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 function dist(a,b,c,d){ // metres, equirectangular - fine for short range
   const x=(d-b)*Math.PI/180*Math.cos((a+c)/2*Math.PI/180), y=(c-a)*Math.PI/180;
   return Math.sqrt(x*x+y*y)*6371000;
 }
 
-// Load the data tile(s) that overlap a square around the user (cached after first load)
+// species.json is small and loaded once; each tree stores only an index into it
+const speciesReady=fetch('data/species.json').then(r=>r.json()).then(j=>{species=j;});
+
 function loadTile(a,b){
   const k=a+'_'+b;
   if(!cache[k]) cache[k]=new Promise(res=>{
-    Papa.parse('data/london/'+k+'.csv',{download:true,header:true,skipEmptyLines:true,
-      complete:r=>res(r.data.map(x=>({id:x.id,lat:+x.lat,lon:+x.lon}))),
+    Papa.parse('data/trees/'+k+'.csv',{download:true,header:true,skipEmptyLines:true,
+      complete:r=>res(r.data.map(x=>({id:x.id,lat:+x.lat,lon:+x.lon,sp:+x.sp,dia:x.dia,addr:x.addr,loc:x.loc}))),
       error:()=>res([])});             // tile doesn't exist (outside the city) -> no trees
   });
   return cache[k];
@@ -68,15 +73,26 @@ function tilesFor(lat,lon,r){
     for(let b=Math.floor((lon-dLon)/STEP);b<=Math.floor((lon+dLon)/STEP);b++) out.push([a,b]);
   return out;
 }
+function title(t){const s=species[t.sp]||{};return s.common||s.sci||'Unknown tree';}
+function popup(t,d){
+  const s=species[t.sp]||{};
+  return `<b>${esc(title(t))}</b>`+(s.sci?`<br><i>${esc(s.sci)}</i>`:'')+
+    `<br>Trunk diameter: ${t.dia?esc(t.dia)+' cm':'unknown'}`+
+    (t.addr?`<br>${esc(t.addr)}`:'')+(t.loc?` · ${esc(t.loc)}`:'')+
+    `<br>${Math.round(d)} m away`+
+    (s.fact?`<div class="fact">${esc(s.fact)}</div>`:'')+
+    (s.chk?`<div class="w">⚠ City records disagree on this tree's species - verify before relying on it.</div>`:'')+
+    `<br><small>ID ${esc(t.id)}</small>`;
+}
 
 async function update(){
   if(!me) return;
   const my=++token, r=+$('radius').value;
   status('Loading nearby trees…');
-  const sets=await Promise.all(tilesFor(me[0],me[1],r).map(([a,b])=>loadTile(a,b)));
+  const sets=await Promise.all([speciesReady,...tilesFor(me[0],me[1],r).map(([a,b])=>loadTile(a,b))]);
   if(my!==token) return;               // a newer position arrived while loading
   const near=[];
-  for(const set of sets) for(const t of set){
+  for(const set of sets.slice(1)) for(const t of set){
     if(Math.abs(t.lat-me[0])>r/111000) continue;       // cheap pre-filter
     const d=dist(me[0],me[1],t.lat,t.lon);
     if(d<=r) near.push({t,d});
@@ -86,11 +102,12 @@ async function update(){
   const list=$('list'); list.innerHTML='';
   near.slice(0,400).forEach(({t,d},i)=>{
     L.circleMarker([t.lat,t.lon],{renderer:canvas,radius:6,color:'#fff',weight:1,fillColor:'#2f8f4a',fillOpacity:.95})
-      .bindPopup(`<b>Tree #${t.id}</b><br>${Math.round(d)} m away`).addTo(layer);
+      .bindPopup(popup(t,d)).addTo(layer);
     if(i<50){
+      const s=species[t.sp]||{};
       const el=document.createElement('div'); el.className='t';
-      el.innerHTML=`<span class="dot" style="background:#2f8f4a"></span><div><b>Tree #${t.id}</b><small>${t.lat.toFixed(5)}, ${t.lon.toFixed(5)}</small></div><span class="d">${Math.round(d)} m</span>`;
-      el.onclick=()=>map.setView([t.lat,t.lon],19);
+      el.innerHTML=`<span class="dot" style="background:#2f8f4a"></span><div><b>${esc(title(t))}</b><small>${s.sci?'<i>'+esc(s.sci)+'</i>':''}${t.addr?' · '+esc(t.addr):''}</small></div><span class="d">${Math.round(d)} m</span>`;
+      el.onclick=()=>{map.setView([t.lat,t.lon],19);};
       list.appendChild(el);
     }
   });
