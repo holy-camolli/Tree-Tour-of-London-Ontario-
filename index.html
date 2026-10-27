@@ -55,7 +55,7 @@ function dist(a,b,c,d){ // metres, equirectangular - fine for short range
 }
 
 // species.json is small and loaded once; each tree stores only an index into it
-const speciesReady=fetch('data/species.json').then(r=>r.json()).then(j=>{species=j;});
+const speciesReady=fetch('species.json').then(r=>r.json()).then(j=>{species=j;});
 
 function loadTile(a,b){
   const k=a+'_'+b;
